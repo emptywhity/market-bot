@@ -48,7 +48,7 @@ client.once('ready', async () => {
   console.log('✅ Bot conectado a Discord');
 
   // Cron: cada hora en punto
-  cron.schedule('* * * * *', async () => {
+  cron.schedule('0 * * * *', async () => {
 
     const channel = await client.channels.fetch(channelId);
     
