@@ -43,7 +43,7 @@ async function getCryptoNews() {
 client.once('ready', async () => {
   console.log('✅ Bot conectado a Discord');
 
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('* * * * *', async () => {
     const channel = await client.channels.fetch(channelId);
     const priceMsg = await getCryptoTrends();
     const newsMsg = await getCryptoNews();
