@@ -1,15 +1,16 @@
-require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const axios = require('axios');
-const cron = require('node-cron');
 const RSSParser = require('rss-parser');
 const parser = new RSSParser();
 
-// Discord bot client
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// Variables de entorno (definidas en GitHub Secrets)
+const token = process.env.DISCORD_TOKEN;
 const channelId = process.env.DISCORD_CHANNEL_ID;
 
-// 📈 Obtener tendencias de criptomonedas (CoinPaprika)
+// Inicializar el cliente de Discord
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// 📈 Obtener tendencias de criptomonedas desde CoinPaprika
 async function getCryptoTrends() {
   try {
     const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
@@ -27,7 +28,7 @@ async function getCryptoTrends() {
   }
 }
 
-// 🗞️ Obtener noticias recientes de Cointelegraph
+// 🗞️ Obtener noticias desde Cointelegraph RSS
 async function getCryptoNews() {
   try {
     const feed = await parser.parseURL('https://cointelegraph.com/rss');
@@ -39,27 +40,21 @@ async function getCryptoNews() {
   }
 }
 
-// 🟢 Cuando el bot esté listo
+// 🔁 Ejecutar cuando el bot esté listo
 client.once('ready', async () => {
-  console.log('✅ Bot conectado a Discord');
-
-  cron.schedule('0 * * * *', async () => {
+  try {
     const channel = await client.channels.fetch(channelId);
     const priceMsg = await getCryptoTrends();
     const newsMsg = await getCryptoNews();
 
     const message = `📊 **Tendencias de criptomonedas (última hora):**\n\n${priceMsg}\n\n🗞️ **Noticias recientes:**\n${newsMsg}`;
-    channel.send(message);
-  });
+    await channel.send(message);
+  } catch (err) {
+    console.error("❌ Error al enviar mensaje:", err);
+  } finally {
+    client.destroy(); // Cierra la conexión y termina el proceso
+  }
 });
 
-// 🔐 Iniciar sesión en Discord
-client.login(process.env.DISCORD_TOKEN);
-
-// 🌐 Express para mantener vivo el servicio en Render
-const express = require('express');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => res.send('Bot de criptomonedas activo ✅'));
-app.listen(PORT, () => console.log(`🌐 Servidor Express escuchando en puerto ${PORT}`));
+// Iniciar sesión en Discord
+client.login(token);
