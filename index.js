@@ -3,23 +3,25 @@ const axios = require('axios');
 const RSSParser = require('rss-parser');
 const parser = new RSSParser();
 
-// Variables de entorno (definidas en GitHub Secrets)
+// Variables de entorno (GitHub Actions)
 const token = process.env.DISCORD_TOKEN;
 const channelId = process.env.DISCORD_CHANNEL_ID;
 
-// Inicializar el cliente de Discord
+// Inicializar cliente Discord
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// 📈 Obtener tendencias de criptomonedas desde CoinPaprika
+// 📈 Tendencias cripto (CoinPaprika)
 async function getCryptoTrends() {
   try {
     const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
 
     const top5 = res.data
       .filter(coin => coin.rank <= 5)
-      .map(coin =>
-        `🪙 ${coin.name} (${coin.symbol}): $${coin.quotes.USD.price.toFixed(2)} (${coin.quotes.USD.percent_change_1h?.toFixed(2)}% en 1h)`
-      );
+      .map(coin => {
+        const pct = coin.quotes.USD.percent_change_1h;
+        const emoji = pct >= 0 ? '📈' : '📉';
+        return `${emoji} ${coin.name} (${coin.symbol}): $${coin.quotes.USD.price.toFixed(2)} (${pct?.toFixed(2)}% en 1h)`;
+      });
 
     return top5.join('\n');
   } catch (error) {
@@ -28,7 +30,7 @@ async function getCryptoTrends() {
   }
 }
 
-// 🗞️ Obtener noticias desde Cointelegraph RSS
+// 🗞️ Noticias cripto (Cointelegraph)
 async function getCryptoNews() {
   try {
     const feed = await parser.parseURL('https://cointelegraph.com/rss');
@@ -40,21 +42,30 @@ async function getCryptoNews() {
   }
 }
 
-// 🔁 Ejecutar cuando el bot esté listo
+// 🔁 Al iniciar
 client.once('ready', async () => {
   try {
     const channel = await client.channels.fetch(channelId);
     const priceMsg = await getCryptoTrends();
     const newsMsg = await getCryptoNews();
+    const now = new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid' });
 
-    const message = `📊 **Tendencias de criptomonedas (última hora):**\n\n${priceMsg}\n\n🗞️ **Noticias recientes:**\n${newsMsg}`;
+    const message = 
+`📊 **Top 5 Criptomonedas por volumen (1h):**\n\n${priceMsg}
+
+━━━━━━━━━━━━━━━━━━
+
+🗞️ **Noticias Cripto Recientes:**\n${newsMsg}
+
+🕒 *Actualizado: ${now}*`;
+
     await channel.send(message);
   } catch (err) {
     console.error("❌ Error al enviar mensaje:", err);
   } finally {
-    client.destroy(); // Cierra la conexión y termina el proceso
+    client.destroy(); // Cierra conexión
   }
 });
 
-// Iniciar sesión en Discord
+// Inicia sesión en Discord
 client.login(token);
