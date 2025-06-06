@@ -11,25 +11,22 @@ const channelId = process.env.DISCORD_CHANNEL_ID;
 // 📈 Función para obtener las tendencias de criptomonedas
 async function getCryptoTrends() {
   try {
-    const res = await axios.get('https://api.coingecko.com/api/v3/coins/markets', {
-      params: {
-        vs_currency: 'usd',
-        order: 'volume_desc',
-        per_page: 5,
-        price_change_percentage: '1h',
-        page: 1
-      }
-    });
+    const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
 
-    return res.data.map(coin =>
-      `🪙 ${coin.name} (${coin.symbol.toUpperCase()}): $${coin.current_price} (${coin.price_change_percentage_1h_in_currency?.toFixed(2)}% en 1h)`
-    ).join('\n');
+    const top5 = res.data
+      .filter(coin => coin.rank <= 5)
+      .map(coin =>
+        `🪙 ${coin.name} (${coin.symbol}): $${coin.quotes.USD.price.toFixed(2)} (${coin.quotes.USD.percent_change_1h?.toFixed(2)}% en 1h)`
+      );
+
+    return top5.join('\n');
 
   } catch (error) {
-    console.error("❌ Error obteniendo criptomonedas:", error);
+    console.error("❌ Error obteniendo criptomonedas:", error.response?.data || error.message);
     return 'Error al obtener datos de criptomonedas';
   }
 }
+
 
 // 🗞️ Función para leer titulares de Cointelegraph
 async function getCryptoNews() {
@@ -51,7 +48,7 @@ client.once('ready', async () => {
   console.log('✅ Bot conectado a Discord');
 
   // Cron: cada hora en punto
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('* * * * *', async () => {
 
     const channel = await client.channels.fetch(channelId);
     
