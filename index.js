@@ -1,16 +1,7 @@
-// index.js
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const cron = require('node-cron');
-
-const { sendHeatmap } = require('./modules/heatmap');
-const { sendSupportResistance } = require('./modules/support');
-const { checkBreakouts } = require('./modules/breakouts');
-const { sendAINewsSummary } = require('./modules/ai-news');
-const { checkPatterns } = require('./modules/patterns');
-const { sendDailySummary } = require('./modules/summary');
-const { checkWatchlist } = require('./modules/watchlist');
-
+const features = require('./market-features');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const channelId = process.env.DISCORD_CHANNEL_ID;
@@ -19,27 +10,15 @@ client.once('ready', async () => {
   console.log('✅ Bot avanzado conectado a Discord');
   const channel = await client.channels.fetch(channelId);
 
-  // Cada hora: mapa de calor
-  cron.schedule('0 * * * *', () => sendHeatmap(channel));
+  cron.schedule('0 * * * *',     () => features.sendHeatmap(channel));           // cada hora
+  cron.schedule('0 */2 * * *',   () => features.sendSupportResistance(channel));// cada 2h
+  cron.schedule('*/30 * * * *',  () => features.checkBreakouts(channel));       // cada 30m
+  cron.schedule('0 */20 * * *',  () => features.checkWatchlist(channel));       // cada 20m
+  cron.schedule('0 */3 * * *',   () => features.checkPatterns(channel));        // cada 3h
+  cron.schedule('0 8 * * *',     () => features.sendDailySummary(channel,'pre'));  // 08:00
+  cron.schedule('0 20 * * *',    () => features.sendDailySummary(channel,'post'));// 20:00
+  cron.schedule('40 10 * * *',   () => features.sendCryptoNews(channel));       // 10:40
 
-  // Cada 2 horas: soporte/resistencia
-  cron.schedule('0 */2 * * *', () => sendSupportResistance(channel));
-
-  // Cada 30 minutos: ruptura de rangos
-  cron.schedule('*/30 * * * *', () => checkBreakouts(channel));
-
-  // resumen 
-  cron.schedule('0 20 * * *', () => sendAINewsSummary(channel));
-
-  // Cada 3 horas: detección de patrones
-  cron.schedule('0 */3 * * *', () => checkPatterns(channel));
-
-  // Cada hora: verificación de watchlist
-  cron.schedule('0 * * * *', () => checkWatchlist(channel));
-
-  // 08:00 y 20:00 resumen diario
-  cron.schedule('0 8 * * *', () => sendDailySummary(channel, 'pre'));
-  cron.schedule('0 20 * * *', () => sendDailySummary(channel, 'post'));
 });
 
 client.login(process.env.DISCORD_TOKEN);
