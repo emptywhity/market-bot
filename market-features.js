@@ -1,8 +1,9 @@
+// market-features.js
 const axios = require('axios');
 const RSSParser = require('rss-parser');
 const parser = new RSSParser();
 
-// ————————— 1. Watchlist: alerta por variación porcentual —————————
+// ————— 1. Watchlist: alerta por variación porcentual —————
 const watchlist = [
   { id: 'bitcoin', symbol: 'BTC', threshold: 1.5 },
   { id: 'ethereum', symbol: 'ETH', threshold: 2 },
@@ -33,28 +34,47 @@ ${alerts.join('\n')}`);
   }
 }
 
-// ————————— 2. Breakouts de rango —————————
+// ————— 2. Breakouts de rango —————
 async function checkBreakouts(channel) {
   try {
-    const res = await axios.get('https://api.binance.com/api/v3/klines', {
-      params: { symbol: 'BTCUSDT', interval: '1h', limit: 20 }
-    });
-    const highs = res.data.map(k => parseFloat(k[2]));
-    const lows  = res.data.map(k => parseFloat(k[3]));
-    const lastClose = parseFloat(res.data.at(-1)[4]);
-    const recentHigh = Math.max(...highs.slice(0, -1));
-    const recentLow  = Math.min(...lows.slice(0, -1));
-    let msg;
-    if (lastClose > recentHigh) msg = `🚨 **Breakout alcista BTC:** $${lastClose.toFixed(2)} > ${recentHigh.toFixed(2)}`;
-    else if (lastClose < recentLow) msg = `⚠️ **Breakout bajista BTC:** $${lastClose.toFixed(2)} < ${recentLow.toFixed(2)}`;
-    else return;  // no enviar si sigue en rango
-    await channel.send(msg);
+    const data = await fetchKlinesFallback('BTCUSDT', '1h', 20);
+    processBreakout(channel, data);
   } catch (err) {
     console.error('❌ Error breakout:', err.message);
   }
 }
 
-// ————————— 3. Top 3 ganadoras/perdedoras 1h —————————
+function processBreakout(channel, data) {
+  const highs = data.map(k => parseFloat(k[2]));
+  const lows  = data.map(k => parseFloat(k[3]));
+  const lastClose = parseFloat(data.at(-1)[4]);
+  const recentHigh = Math.max(...highs.slice(0, -1));
+  const recentLow  = Math.min(...lows.slice(0, -1));
+  if (lastClose > recentHigh) {
+    channel.send(`🚨 **Breakout alcista BTC:** $${lastClose.toFixed(2)} > ${recentHigh.toFixed(2)}`);
+  } else if (lastClose < recentLow) {
+    channel.send(`⚠️ **Breakout bajista BTC:** $${lastClose.toFixed(2)} < ${recentLow.toFixed(2)}`);
+  }
+}
+
+async function fetchKlinesFallback(symbol, interval, limit) {
+  try {
+    const res = await axios.get('https://api.binance.com/api/v3/klines', { params: { symbol, interval, limit } });
+    return res.data;
+  } catch (err) {
+    if (err.response?.status === 451) {
+      console.warn('⚠️ Binance bloqueado, usando CoinGecko OHLC');
+      const geo = await axios.get(`https://api.coingecko.com/api/v3/coins/${symbol.toLowerCase().replace('usdt','')}/ohlc`, {
+        params: { vs_currency: 'usd', days: 1 }
+      });
+      // Convertir [ts, open, high, low, close] a formato kline
+      return geo.data.map(k => [k[0], k[1], k[2], k[3], k[4], 0]);
+    }
+    throw err;
+  }
+}
+
+// ————— 3. Top 3 ganadoras/perdedoras 1h —————
 async function getWinnersLosers(channel) {
   try {
     const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
@@ -75,7 +95,7 @@ ${losers.join(' | ')}`);
   }
 }
 
-// ————————— 4. Noticias filtradas por keyword —————————
+// ————— 4. Noticias filtradas por keyword —————
 const keywords = ['SEC','Binance','ETF','liquidation','Kraken'];
 async function sendFilteredNews(channel) {
   try {
@@ -92,7 +112,7 @@ ${out}`);
   }
 }
 
-// ————————— 5. Resumen diario de cierre —————————
+// ————— 5. Resumen diario de cierre —————
 async function sendDailySnapshot(channel) {
   try {
     const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
@@ -106,68 +126,64 @@ ${top5}`);
   }
 }
 
-// —————— 6. Señales de futuros long/short ——————
+// ————— 6. Señales de futuros long/short con fallback —————
 async function checkFuturesSignals(channel) {
   try {
-    // 1) Obtener velas BTCUSDT 1h (últimas 100)
-    const klines = (await axios.get('https://api.binance.com/api/v3/klines', {
-      params: { symbol: 'BTCUSDT', interval: '1h', limit: 100 }
-    })).data;
+    // Obtener OHLC
+    const data = await fetchKlinesFallback('BTCUSDT', '1h', 100);
+    const closes = data.map(k => parseFloat(k[4]));
 
-    const closes = klines.map(k => parseFloat(k[4]));
-
-    // 2) Calcular EMA20 y EMA50
-    const ema = (period, data) => {
+    // EMA
+    const ema = (period, arr) => {
       const k = 2/(period+1);
-      return data.reduce((prev, price, i) =>
-        i === 0 ? price
-        : price * k + prev * (1-k)
-      , data[0]);
+      return arr.reduce((prev, p, i) => i===0?p:p*k + prev*(1-k), arr[0]);
     };
-    const ema20 = ema(20, closes.slice(-50)); // últimos 50 para estabilizar
+    const ema20 = ema(20, closes.slice(-50));
     const ema50 = ema(50, closes);
 
-    // 3) Calcular RSI14
-    const rsi = (period, data) => {
+    // RSI14
+    const rsi = (period, arr) => {
       let gains=0, losses=0;
-      for (let i=1; i<=period; i++) {
-        const diff = data[i] - data[i-1];
-        if (diff>0) gains += diff; else losses -= diff;
+      for (let i=1;i<=period;i++){
+        const d = arr[i]-arr[i-1];
+        if(d>0) gains+=d; else losses-=d;
       }
-      const avgGain = gains/period, avgLoss = losses/period;
-      const rs = avgGain/avgLoss || 0;
-      return 100 - (100/(1+rs));
+      const avgG=gains/period, avgL=losses/period;
+      const rs=avgG/avgL||0;
+      return 100-(100/(1+rs));
     };
     const rsi14 = rsi(14, closes.slice(-15));
 
-    // 4) Funding Rate de BTC
-    const fr = (await axios.get('https://fapi.binance.com/fapi/v1/premiumIndex', {
-      params: { symbol: 'BTCUSDT' }
-    })).data.lastFundingRate * 100; // en %
+    // Funding Rate
+    const frRes = await axios.get('https://fapi.binance.com/fapi/v1/premiumIndex',{ params:{symbol:'BTCUSDT'} });
+    const fr = frRes.data.lastFundingRate*100;
 
-    // 5) Evaluar condiciones
-    const longSignal = ema20 > ema50 && rsi14 < 30 && fr < 0;
-    const shortSignal = ema20 < ema50 && rsi14 > 70 && fr > 0.02;
+    // Condiciones
+    const longSignal = ema20>ema50 && rsi14<30 && fr<0;
+    const shortSignal = ema20<ema50 && rsi14>70 && fr>0.02;
 
-    // 6) Enviar alerta si coincide
-    if (longSignal) {
-      await channel.send(`🟢 **Señal LONG BTCUSD**\n• EMA20: ${ema20.toFixed(2)} > EMA50: ${ema50.toFixed(2)}\n• RSI14: ${rsi14.toFixed(1)} (<30)\n• Funding Rate: ${fr.toFixed(4)}% (<0)`);
-    }
-    if (shortSignal) {
-      await channel.send(`🔴 **Señal SHORT BTCUSD**\n• EMA20: ${ema20.toFixed(2)} < EMA50: ${ema50.toFixed(2)}\n• RSI14: ${rsi14.toFixed(1)} (>70)\n• Funding Rate: ${fr.toFixed(4)}% (>0.02)`);
-    }
+    if(longSignal) await channel.send(
+      `🟢 **Señal LONG BTC**\n`+
+      `EMA20: ${ema20.toFixed(2)} > EMA50: ${ema50.toFixed(2)}\n`+
+      `RSI14: ${rsi14.toFixed(1)} (<30)\n`+
+      `Funding: ${fr.toFixed(4)}% (<0)`
+    );
+    if(shortSignal) await channel.send(
+      `🔴 **Señal SHORT BTC**\n`+
+      `EMA20: ${ema20.toFixed(2)} < EMA50: ${ema50.toFixed(2)}\n`+
+      `RSI14: ${rsi14.toFixed(1)} (>70)\n`+
+      `Funding: ${fr.toFixed(4)}% (>0.02%)`
+    );
   } catch (err) {
     console.error('❌ Error señales futuros:', err.message);
   }
 }
-
-module.exports.checkFuturesSignals = checkFuturesSignals;
-
 
 module.exports = {
   checkWatchlist,
   checkBreakouts,
   getWinnersLosers,
   sendFilteredNews,
-  sendDailySnapshot
+  sendDailySnapshot,
+  checkFuturesSignals
 };
