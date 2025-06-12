@@ -12,7 +12,15 @@ const CANDLES     = 250;
 const WATCHLIST   = (process.env.WATCHLIST || SYMBOL).split(',').map(s => s.trim());
 
 // ───── Conexión CCXT ───────────────────────
-const exchange = new ccxt[EXCHANGE_ID]({ enableRateLimit: true });
+const exchange = new ccxt[EXCHANGE_ID]({
+  enableRateLimit: true,
+  // si pedimos "binance", activamos el modo futuros
+  ...(EXCHANGE_ID === 'binance'
+    ? { options: { defaultType: 'future' } }
+    : {}
+  ),
+});
+
 
 // ───── 1) WATCHLIST: precios + %24h (cálculo con velas diarias) ───────
 async function checkWatchlist(channel) {
