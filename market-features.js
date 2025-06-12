@@ -62,7 +62,7 @@ async function checkWatchlist(channel) {
 async function sendFilteredNews(channel) {
   try {
     const res = await fetch(
-      'https://api.reddit.com/r/CryptoCurrency/top?limit=3&t=day',
+      'https://www.reddit.com/r/CryptoCurrency/top.json?limit=3&t=day&raw_json=1',
       {
         headers: {
           'User-Agent': 'MarketBot/1.0',
@@ -74,7 +74,8 @@ async function sendFilteredNews(channel) {
       console.error('sendFilteredNews HTTP error', res.status, res.statusText);
       return channel.send('📰 No pude obtener noticias, status ' + res.status);
     }
-    const { data: { children: posts } } = await res.json();
+    const json = await res.json();
+    const posts = json.data.children;
     if (!posts.length) {
       return channel.send('📰 No hay posts recientes en r/CryptoCurrency.');
     }
