@@ -12,15 +12,7 @@ const CANDLES     = 250;
 const WATCHLIST   = (process.env.WATCHLIST || SYMBOL).split(',').map(s => s.trim());
 
 // ───── Conexión CCXT ───────────────────────
-const exchange = new ccxt[EXCHANGE_ID]({
-  enableRateLimit: true,
-  // si pedimos "binance", activamos el modo futuros
-  ...(EXCHANGE_ID === 'binance'
-    ? { options: { defaultType: 'future' } }
-    : {}
-  ),
-});
-
+const exchange = new ccxt[EXCHANGE_ID]({ enableRateLimit: true });
 
 // ───── 1) WATCHLIST: precios + %24h (cálculo con velas diarias) ───────
 async function checkWatchlist(channel) {
@@ -58,20 +50,29 @@ async function checkWatchlist(channel) {
   }
 }
 
-// ───── 2) NEWS: top posts de r/CryptoCurrency ─────────────────────────
+// ───── 2) NEWS: top posts de r/CryptoCurrency (usa api.reddit.com)
 async function sendFilteredNews(channel) {
   try {
     const res = await fetch(
-      'https://www.reddit.com/r/CryptoCurrency/top.json?limit=3&t=day',
-      { headers: { 'User-Agent': 'MarketBot/1.0' } }
+      'https://api.reddit.com/r/CryptoCurrency/top?limit=3&t=day',
+      {
+        headers: {
+          'User-Agent': 'MarketBot/1.0',
+          'Accept': 'application/json'
+        }
+      }
     );
+    if (!res.ok) {
+      console.error('sendFilteredNews HTTP error', res.status, res.statusText);
+      return channel.send('📰 No pude obtener noticias, status ' + res.status);
+    }
     const { data: { children: posts } } = await res.json();
     if (!posts.length) {
       return channel.send('📰 No hay posts recientes en r/CryptoCurrency.');
     }
     const embed = new EmbedBuilder()
       .setTitle('📰 Top posts • r/CryptoCurrency (24h)')
-      .setURL('https://www.reddit.com/r/CryptoCurrency/')
+      .setURL('https://reddit.com/r/CryptoCurrency/')
       .setTimestamp();
     posts.forEach(({ data: d }) => {
       embed.addFields({
@@ -80,6 +81,11 @@ async function sendFilteredNews(channel) {
       });
     });
     await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error('sendFilteredNews error', err);
+    await channel.send('❌ Error al obtener noticias, revisa la consola.');
+  }
+}
   } catch (err) {
     console.error('sendFilteredNews error', err);
     await channel.send('❌ Error al obtener noticias, revisa la consola.');
