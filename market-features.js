@@ -1,3 +1,11 @@
+/**
+ * market-features.js
+ * Solo:
+ * - checkWatchlist      → precios y %24h de tu lista
+ * - sendFilteredNews    → top posts de r/CryptoCurrency
+ * - checkFuturesSignals → señal LONG/SHORT con TP/SL
+ */
+
 require('dotenv').config();
 const ccxt = require('ccxt');
 const ti = require('technicalindicators');
@@ -7,7 +15,7 @@ const { EmbedBuilder } = require('discord.js');
 // ───── Configuración ───────────────────────
 const EXCHANGE_ID = process.env.EXCHANGE || 'binanceusdm';
 const SYMBOL      = process.env.SYMBOL  || 'BTC/USDT';
-const TIMEFRAME   = process.env.TIMEFRAME || '5m';
+const TIMEFRAME   = process.env.TIMEFRAME || '1h';  // cambiado a 1 hora
 const CANDLES     = 250;
 const WATCHLIST   = (process.env.WATCHLIST || SYMBOL).split(',').map(s => s.trim());
 
@@ -86,11 +94,7 @@ async function sendFilteredNews(channel) {
     await channel.send('❌ Error al obtener noticias, revisa la consola.');
   }
 }
-  } catch (err) {
-    console.error('sendFilteredNews error', err);
-    await channel.send('❌ Error al obtener noticias, revisa la consola.');
-  }
-}
+
 
 // ───── 3) FUTURES: señal LONG/SHORT + Entry/SL/TP${1}&TP${2} ─────────────
 const fastPeriod = 12;

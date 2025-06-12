@@ -62,8 +62,8 @@ client.once('ready', async () => {
   const channel = await client.channels.fetch(CHANNEL_ID);
 
   cron.schedule('*/20 * * * *', () => checkWatchlist(channel));
-  cron.schedule('0 * * * *',    () => sendFilteredNews(channel));
-  cron.schedule('*/15 * * * *', () => checkFuturesSignals(channel));
+  cron.schedule('0 0,8,16 * * *', () => sendFilteredNews(channel));
+  cron.schedule('0 * * * *', () => checkFuturesSignals(channel));
 
   console.log('⏰ Cron-jobs programados: watchlist (20m), news (hora), futures (15m)');
 });
