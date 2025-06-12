@@ -1,184 +1,319 @@
-// market-features.js
-const axios = require('axios');
-const RSSParser = require('rss-parser');
-const parser = new RSSParser();
+/**
+ * market-features.js
+ * Módulos para tu MarketBot:
+ * - checkWatchlist       → precios y %24h de tu lista
+ * - checkBreakouts       → detecta ruptura de máximos recientes
+ * - getWinnersLosers     → top 5 ganadoras y perdedoras 24h
+ * - sendFilteredNews     → últimas 3 noticias cripto (NewsAPI)
+ * - sendDailySnapshot    → snapshot diario (watchlist + movers)
+ * - checkFuturesSignals  → señal LONG/SHORT/NO TRADE (ya la tenías)
+ */
 
-// ————— 1. Watchlist: alerta por variación porcentual —————
-const watchlist = [
-  { id: 'bitcoin', symbol: 'BTC', threshold: 1.5 },
-  { id: 'ethereum', symbol: 'ETH', threshold: 2 },
-  { id: 'solana', symbol: 'SOL', threshold: 3 }
-];
+require('dotenv').config();
+const ccxt = require('ccxt');
+const ti = require('technicalindicators');
+const fetch = require('node-fetch');            // npm install node-fetch@2
+const { EmbedBuilder } = require('discord.js');
+
+// ───────────────────────────────────────────────────────────
+// Configuración
+// ───────────────────────────────────────────────────────────
+const EXCHANGE_ID = process.env.EXCHANGE || 'binanceusdm';
+const SYMBOL      = process.env.SYMBOL || 'BTC/USDT';
+const TIMEFRAME   = process.env.TIMEFRAME || '5m';
+const CANDLES     = 250;
+const WATCHLIST   = (process.env.WATCHLIST || SYMBOL).split(',').map(s => s.trim());
+const NEWS_KEY    = process.env.NEWS_API_KEY || '';
+
+// ───────────────────────────────────────────────────────────
+// Conexión CCXT
+// ───────────────────────────────────────────────────────────
+const exchange = new ccxt[EXCHANGE_ID]({ enableRateLimit: true });
+
+// ───────────────────────────────────────────────────────────
+// 1) WATCHLIST: precio + %24h
+// ───────────────────────────────────────────────────────────
 async function checkWatchlist(channel) {
   try {
-    const ids = watchlist.map(c => c.id).join(',');
-    const { data } = await axios.get(
-      'https://api.coingecko.com/api/v3/coins/markets',
-      { params: { vs_currency: 'usd', ids, price_change_percentage: '1h' } }
-    );
-    const alerts = data
-      .map(c => {
-        const w = watchlist.find(x => x.id === c.id);
-        const change = c.price_change_percentage_1h_in_currency;
-        if (Math.abs(change) >= w.threshold) {
-          const dir = change > 0 ? '🔼 subido' : '🔻 bajado';
-          return `🚨 ${w.symbol} ${dir} ${change.toFixed(2)}% (precio $${c.current_price.toFixed(2)})`;
-        }
-        return null;
+    const data = await Promise.all(
+      WATCHLIST.map(async sym => {
+        const tk = await exchange.fetchTicker(sym);
+        return { sym, last: tk.last, change: tk.percentage };
       })
-      .filter(Boolean);
-    if (alerts.length) await channel.send(`📈 **Alertas Watchlist**:
-${alerts.join('\n')}`);
+    );
+    const embed = new EmbedBuilder()
+      .setTitle('🔍 Watchlist')
+      .setTimestamp();
+    data.forEach(d =>
+      embed.addFields({
+        name: d.sym,
+        value: `Precio: ${d.last}\n24h: ${d.change?.toFixed(2) ?? 'N/A'}%`,
+        inline: true
+      })
+    );
+    await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('❌ Error watchlist:', err.message);
+    console.error('checkWatchlist error', err);
+    await channel.send('❌ Error en Watchlist, revisa la consola.');
   }
 }
 
-// ————— 2. Breakouts de rango —————
+// ───────────────────────────────────────────────────────────
+// 2) BREAKOUTS: última vela rompe máximo de n previas
+// ───────────────────────────────────────────────────────────
 async function checkBreakouts(channel) {
   try {
-    const data = await fetchKlinesFallback('BTCUSDT', '1h', 20);
-    processBreakout(channel, data);
-  } catch (err) {
-    console.error('❌ Error breakout:', err.message);
-  }
-}
-
-function processBreakout(channel, data) {
-  const highs = data.map(k => parseFloat(k[2]));
-  const lows  = data.map(k => parseFloat(k[3]));
-  const lastClose = parseFloat(data.at(-1)[4]);
-  const recentHigh = Math.max(...highs.slice(0, -1));
-  const recentLow  = Math.min(...lows.slice(0, -1));
-  if (lastClose > recentHigh) {
-    channel.send(`🚨 **Breakout alcista BTC:** $${lastClose.toFixed(2)} > ${recentHigh.toFixed(2)}`);
-  } else if (lastClose < recentLow) {
-    channel.send(`⚠️ **Breakout bajista BTC:** $${lastClose.toFixed(2)} < ${recentLow.toFixed(2)}`);
-  }
-}
-
-async function fetchKlinesFallback(symbol, interval, limit) {
-  try {
-    const res = await axios.get('https://api.binance.com/api/v3/klines', { params: { symbol, interval, limit } });
-    return res.data;
-  } catch (err) {
-    if (err.response?.status === 451) {
-      console.warn('⚠️ Binance bloqueado, usando CoinGecko OHLC');
-      const geo = await axios.get(`https://api.coingecko.com/api/v3/coins/${symbol.toLowerCase().replace('usdt','')}/ohlc`, {
-        params: { vs_currency: 'usd', days: 1 }
-      });
-      // Convertir [ts, open, high, low, close] a formato kline
-      return geo.data.map(k => [k[0], k[1], k[2], k[3], k[4], 0]);
+    const lines = [];
+    for (const sym of WATCHLIST) {
+      const ohlcv = await exchange.fetchOHLCV(sym, TIMEFRAME, undefined, 21);
+      const highs = ohlcv.map(c => c[2]);
+      const closes = ohlcv.map(c => c[4]);
+      const prevMax = Math.max(...highs.slice(0, -1));
+      const lastClose = closes.at(-1);
+      if (lastClose > prevMax) {
+        lines.push(`🚀 **${sym}**: rompió ${prevMax.toFixed(2)} (cierre ${lastClose.toFixed(2)})`);
+      }
     }
-    throw err;
+    if (!lines.length) {
+      await channel.send('🚫 No hay breakouts en tu Watchlist.');
+    } else {
+      await channel.send(lines.join('\n'));
+    }
+  } catch (err) {
+    console.error('checkBreakouts error', err);
+    await channel.send('❌ Error en Breakouts, revisa la consola.');
   }
 }
 
-// ————— 3. Top 3 ganadoras/perdedoras 1h —————
+// ───────────────────────────────────────────────────────────
+// 3) WINNERS/LOSERS: top 5 por %24h
+// ───────────────────────────────────────────────────────────
 async function getWinnersLosers(channel) {
   try {
-    const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
-    const coins = res.data.filter(c => c.quotes.USD.percent_change_1h != null);
-    const winners = [...coins]
-      .sort((a, b) => b.quotes.USD.percent_change_1h - a.quotes.USD.percent_change_1h)
-      .slice(0, 3)
-      .map(c => `📈 ${c.symbol}: +${c.quotes.USD.percent_change_1h.toFixed(2)}%`);
-    const losers = [...coins]
-      .sort((a, b) => a.quotes.USD.percent_change_1h - b.quotes.USD.percent_change_1h)
-      .slice(0, 3)
-      .map(c => `📉 ${c.symbol}: ${c.quotes.USD.percent_change_1h.toFixed(2)}%`);
-    await channel.send(`🏆 **Top 3 (1h) Ganadoras/Perdedoras**:
-${winners.join(' | ')}
-${losers.join(' | ')}`);
+    const tickers = await exchange.fetchTickers();
+    // Solo pares USDT y calculamos el cambio
+    const arr = Object.values(tickers)
+      .filter(t => t.symbol.endsWith('/USDT'))
+      .map(t => {
+        // Si no viene t.percentage, lo calculamos
+        const pct = typeof t.percentage === 'number'
+          ? t.percentage
+          : ((t.last - t.open) / t.open) * 100;
+        return { symbol: t.symbol, pct };
+      });
+
+    // Orden descendente por pct
+    arr.sort((a, b) => b.pct - a.pct);
+
+    const top5 = arr.slice(0, 5);
+    const bot5 = arr.slice(-5).reverse();
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Top 5 Ganadoras / Perdedoras 24 h')
+      .addFields(
+        {
+          name: 'Ganadoras',
+          value: top5.map(t => `${t.symbol}: ${t.pct.toFixed(2)}%`).join('\n'),
+          inline: true
+        },
+        {
+          name: 'Perdedoras',
+          value: bot5.map(t => `${t.symbol}: ${t.pct.toFixed(2)}%`).join('\n'),
+          inline: true
+        }
+      )
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('❌ Error top movers:', err.message);
+    console.error('getWinnersLosers error', err);
+    await channel.send('❌ Error en Gainers/Losers, revisa la consola.');
   }
 }
 
-// ————— 4. Noticias filtradas por keyword —————
-const keywords = ['SEC','Binance','ETF','liquidation','Kraken'];
+// ───────────────────────────────────────────────────────────
+// 4) NEWS: últimas 3 noticias de Crypto (NewsAPI.org)
+// ───────────────────────────────────────────────────────────
 async function sendFilteredNews(channel) {
   try {
-    const feed = await parser.parseURL('https://cointelegraph.com/rss');
-    const items = feed.items.filter(item =>
-      keywords.some(k => item.title.includes(k) || item.description?.includes(k))
-    ).slice(0,5);
-    if (!items.length) return;
-    const out = items.map(i => `📰 [${i.title}](${i.link})`).join('\n');
-    await channel.send(`🗞️ **Noticias Urgentes**:
-${out}`);
+    // 1) Llamada a Reddit JSON
+    const res = await fetch(
+      'https://www.reddit.com/r/CryptoCurrency/top.json?limit=3&t=day',
+      { headers: { 'User-Agent': 'MarketBot/1.0' } }
+    );
+    const j = await res.json();
+    const posts = j.data.children;
+
+    if (!posts || !posts.length) {
+      return channel.send('📰 No hay posts recientes en r/CryptoCurrency.');
+    }
+
+    // 2) Construye embed
+    const embed = new EmbedBuilder()
+      .setTitle('📰 Top posts • r/CryptoCurrency (24h)')
+      .setURL('https://www.reddit.com/r/CryptoCurrency/')
+      .setTimestamp();
+
+    posts.forEach(p => {
+      const d = p.data;
+      embed.addFields({
+        name: d.title.slice(0, 256),
+        value: `⬆️ ${d.ups} • 💬 ${d.num_comments} • [ver link](https://reddit.com${d.permalink})`
+      });
+    });
+
+    await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('❌ Error noticias filtradas:', err.message);
+    console.error('sendFilteredNews error', err);
+    await channel.send('❌ Error al obtener noticias de Reddit, revisa la consola.');
   }
 }
 
-// ————— 5. Resumen diario de cierre —————
+// ───────────────────────────────────────────────────────────
+// 5) SNAPSHOT DIARIO: combina Watchlist + Gainers/Losers
+// ───────────────────────────────────────────────────────────
 async function sendDailySnapshot(channel) {
   try {
-    const res = await axios.get('https://api.coinpaprika.com/v1/tickers');
-    const top5 = res.data.filter(c => c.rank <=5)
-      .map(c => `• ${c.symbol}: $${c.quotes.USD.price.toFixed(2)} (${c.quotes.USD.percent_change_24h.toFixed(2)}%)`)
-      .join('\n');
-    await channel.send(`⌛ **Resumen Diario (20:00)**:
-${top5}`);
+    // —— Parte 1: Watchlist —— (igual que antes)
+    const wlEmbed = new EmbedBuilder()
+      .setTitle('📊 Daily Snapshot • Watchlist')
+      .setTimestamp();
+    const wlLines = await Promise.all(
+      WATCHLIST.map(async sym => {
+        const tk = await exchange.fetchTicker(sym);
+        const pct = typeof tk.percentage === 'number'
+          ? tk.percentage
+          : ((tk.last - tk.open) / tk.open) * 100;
+        return `${sym}: ${tk.last} (${pct.toFixed(1)}%)`;
+      })
+    );
+    wlEmbed.addFields({ name: 'Precios', value: wlLines.join('\n') });
+
+    // —— Parte 2: Movers ——  
+    const tickers = await exchange.fetchTickers();
+    const movers = Object.values(tickers)
+      .filter(t => t.symbol.endsWith('/USDT'))
+      .map(t => {
+        const pct = typeof t.percentage === 'number'
+          ? t.percentage
+          : ((t.last - t.open) / t.open) * 100;
+        return { symbol: t.symbol, pct };
+      })
+      .sort((a, b) => b.pct - a.pct);
+
+    const moversEmbed = new EmbedBuilder()
+      .setTitle('📊 Daily Snapshot • Movers')
+      .setTimestamp()
+      .addFields(
+        {
+          name: 'Top 3',
+          value: movers.slice(0, 3).map(t => `${t.symbol}: ${t.pct.toFixed(1)}%`).join('\n'),
+          inline: true
+        },
+        {
+          name: 'Bot 3',
+          value: movers.slice(-3).reverse().map(t => `${t.symbol}: ${t.pct.toFixed(1)}%`).join('\n'),
+          inline: true
+        }
+      );
+
+    // Enviamos ambos embeds de una vez
+    await channel.send({ embeds: [wlEmbed, moversEmbed] });
   } catch (err) {
-    console.error('❌ Error resumen diario:', err.message);
+    console.error('sendDailySnapshot error', err);
+    await channel.send('❌ Error en Snapshot, revisa la consola.');
   }
 }
 
-// ————— 6. Señales de futuros long/short con fallback —————
+// ───────────────────────────────────────────────────────────
+// 6) Fututes (lo tenías ya)
+// ───────────────────────────────────────────────────────────
+const fastPeriod = 12;
+const slowPeriod = 26;
+const rsiPeriod  = 14;
+const rsiLong    = 55;
+const rsiShort   = 45;
+const colorMap   = { LONG: 0x2ecc71, SHORT: 0xe74c3c, 'NO TRADE': 0x95a5a6 };
+
 async function checkFuturesSignals(channel) {
   try {
-    // Obtener OHLC
-    const data = await fetchKlinesFallback('BTCUSDT', '1h', 100);
-    const closes = data.map(k => parseFloat(k[4]));
+    if (!exchange.markets) await exchange.loadMarkets();
+    const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, CANDLES);
+    const closes = ohlcv.map(c => c[4]);
 
-    // EMA
-    const ema = (period, arr) => {
-      const k = 2/(period+1);
-      return arr.reduce((prev, p, i) => i===0?p:p*k + prev*(1-k), arr[0]);
-    };
-    const ema20 = ema(20, closes.slice(-50));
-    const ema50 = ema(50, closes);
+    // indicadores
+    const emaFast = ti.EMA.calculate({ period: fastPeriod, values: closes });
+    const emaSlow = ti.EMA.calculate({ period: slowPeriod, values: closes });
+    const macdArr = ti.MACD.calculate({ values: closes, fastPeriod, slowPeriod, signalPeriod: 9 });
+    const rsiArr  = ti.RSI.calculate({ period: rsiPeriod, values: closes });
 
-    // RSI14
-    const rsi = (period, arr) => {
-      let gains=0, losses=0;
-      for (let i=1;i<=period;i++){
-        const d = arr[i]-arr[i-1];
-        if(d>0) gains+=d; else losses-=d;
-      }
-      const avgG=gains/period, avgL=losses/period;
-      const rs=avgG/avgL||0;
-      return 100-(100/(1+rs));
-    };
-    const rsi14 = rsi(14, closes.slice(-15));
+    // últimos valores
+    const idx     = closes.length - 1;
+    const price   = closes[idx];
+    const emaF    = emaFast[emaFast.length - 1];
+    const emaS    = emaSlow[emaSlow.length - 1];
+    const { MACD: macd, signal: macdSig } = macdArr[macdArr.length - 1];
+    const rsi     = rsiArr[rsiArr.length - 1];
 
-    // Funding Rate
-    const frRes = await axios.get('https://fapi.binance.com/fapi/v1/premiumIndex',{ params:{symbol:'BTCUSDT'} });
-    const fr = frRes.data.lastFundingRate*100;
+    // dirección y motivos
+    let dir = 'NO TRADE', reasons = [];
+    if (emaF > emaS && macd > macdSig && rsi > rsiLong) {
+      dir = 'LONG';
+      reasons.push('EMA12 > EMA26', 'MACD alcista', `RSI ${rsi.toFixed(1)} > ${rsiLong}`);
+    } else if (emaF < emaS && macd < macdSig && rsi < rsiShort) {
+      dir = 'SHORT';
+      reasons.push('EMA12 < EMA26', 'MACD bajista', `RSI ${rsi.toFixed(1)} < ${rsiShort}`);
+    }
+    // funding info (opcional)
+    let funding = '';
+    if (exchange.has['fetchFundingRate']) {
+      try {
+        const fr = await exchange.fetchFundingRate(SYMBOL);
+        funding = `• Funding ${(fr.fundingRate * 100).toFixed(4)}%`;
+        reasons.push(funding);
+      } catch {}
+    }
 
-    // Condiciones
-    const longSignal = ema20>ema50 && rsi14<30 && fr<0;
-    const shortSignal = ema20<ema50 && rsi14>70 && fr>0.02;
+    // proponemos Entry / SL
+    const entry = price;
+    const stopLoss = emaS; 
+    const risk = Math.abs(entry - stopLoss);
+    let tp1 = null, tp2 = null;
+    if (dir === 'LONG') {
+      tp1 = entry + risk;       // TP1 = entry + riesgo
+      tp2 = entry + risk * 2;   // TP2 = entry + 2×riesgo
+    } else if (dir === 'SHORT') {
+      tp1 = entry - risk;       // TP1 = entry - riesgo
+      tp2 = entry - risk * 2;   // TP2 = entry - 2×riesgo
+    }
 
-    if(longSignal) await channel.send(
-      `🟢 **Señal LONG BTC**\n`+
-      `EMA20: ${ema20.toFixed(2)} > EMA50: ${ema50.toFixed(2)}\n`+
-      `RSI14: ${rsi14.toFixed(1)} (<30)\n`+
-      `Funding: ${fr.toFixed(4)}% (<0)`
-    );
-    if(shortSignal) await channel.send(
-      `🔴 **Señal SHORT BTC**\n`+
-      `EMA20: ${ema20.toFixed(2)} < EMA50: ${ema50.toFixed(2)}\n`+
-      `RSI14: ${rsi14.toFixed(1)} (>70)\n`+
-      `Funding: ${fr.toFixed(4)}% (>0.02%)`
-    );
+    // construye embed
+    const embed = new EmbedBuilder()
+      .setTitle(`Futures Signal • ${SYMBOL} • ${TIMEFRAME}`)
+      .setColor(colorMap[dir])
+      .setDescription(`**${dir}**\n${reasons.join('\n')}`)
+      .addFields(
+        { name: 'Entry',     value: entry.toFixed(2),           inline: true },
+        { name: 'Stop-Loss', value: stopLoss.toFixed(2),       inline: true },
+        { name: 'TP 1:1',    value: tp1  ? tp1.toFixed(2) : '—', inline: true },
+        { name: 'TP 1:2',    value: tp2  ? tp2.toFixed(2) : '—', inline: true },
+        { name: 'EMA12',     value: emaF.toFixed(2),           inline: true },
+        { name: 'EMA26',     value: emaS.toFixed(2),           inline: true },
+        { name: 'MACD',      value: macd.toFixed(2),           inline: true },
+        { name: 'Signal',    value: macdSig.toFixed(2),        inline: true },
+        { name: 'RSI',       value: rsi.toFixed(1),            inline: true }
+      )
+      .setFooter({ text: 'No es asesoramiento financiero' })
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('❌ Error señales futuros:', err.message);
+    console.error('checkFuturesSignals error', err);
+    await channel.send('❌ Error al calcular señal de futuros, revisa logs.');
   }
 }
 
+// ───────────────────────────────────────────────────────────
 module.exports = {
   checkWatchlist,
   checkBreakouts,
