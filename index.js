@@ -1,19 +1,14 @@
-// index.js – Solo slash-commands + cron para Watchlist, News y Futures
+// index.js – Slash-commands + cron + simulador
 require('dotenv').config();
-
-const {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
-  Routes,
-} = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder,
+        REST, Routes } = require('discord.js');
 const cron = require('node-cron');
 
 const {
   checkWatchlist,
   sendFilteredNews,
   checkFuturesSignals,
+  getSimStats
 } = require('./market-features');
 
 const TOKEN      = process.env.DISCORD_TOKEN;
@@ -22,90 +17,68 @@ const CLIENT_ID  = process.env.CLIENT_ID;
 const GUILD_ID   = process.env.GUILD_ID;
 
 if (!TOKEN || !CHANNEL_ID || !CLIENT_ID) {
-  console.error('❌ Faltan DISCORD_TOKEN, DISCORD_CHANNEL_ID o CLIENT_ID en .env');
+  console.error('❌ Config faltante (TOKEN / CHANNEL_ID / CLIENT_ID)');
   process.exit(1);
 }
 
-// 1) Cliente con sólo Guilds intent
-const client = new Client({
-  intents: [ GatewayIntentBits.Guilds ]
-});
+// ——— Cliente (solo Guilds) —————————————————————
+const client = new Client({ intents:[GatewayIntentBits.Guilds] });
 
-// 2) Registro de slash-commands (sólo 3)
-(async () => {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-
+// ——— Registro de slash-commands ——————————————
+(async ()=>{
+  const rest = new REST({version:'10'}).setToken(TOKEN);
   const cmds = [
-    ['watchlist', 'Chequea tu watchlist ahora'],
-    ['news',      'Muestra top posts de r/CryptoCurrency'],
-    ['futures',   'Señal de futuros LONG/SHORT con TP/SL'],
-  ].map(([name, desc]) =>
-    new SlashCommandBuilder().setName(name).setDescription(desc).toJSON()
-  );
+    ['watchlist',  'Chequea tu watchlist'],
+    ['news',       'Top posts r/CryptoCurrency'],
+    ['futures',    'Señal BTC/USDT'],
+    ['sim',        'Estado del simulador'],
+    ['simstats',   'Métricas del simulador']
+  ].map(([n,d])=> new SlashCommandBuilder().setName(n).setDescription(d).toJSON());
 
-  try {
-    console.log('⬆️  Registrando slash-commands…');
-    const route = GUILD_ID
+  const route = GUILD_ID
       ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
       : Routes.applicationCommands(CLIENT_ID);
-    // limpia y registra
-    await rest.put(route, { body: cmds });
-    console.log('✅ Slash-commands listos: watchlist, news, futures');
-  } catch (err) {
-    console.error('❌ Error registrando slash-commands:', err);
-  }
-})();
 
-// 3) Al conectar → programa cron-jobs
-client.once('ready', async () => {
+  console.log('⬆️  Registrando slash-commands…');
+  await rest.put(route, { body:cmds });
+  console.log('✅ Comandos listos.');
+})().catch(console.error);
+
+// ——— Al conectar: cron-jobs ——————————————
+client.once('ready', async ()=>{
   console.log(`🚀 Bot conectado como ${client.user.tag}`);
-  const channel = await client.channels.fetch(CHANNEL_ID);
-
-  cron.schedule('*/20 * * * *', () => checkWatchlist(channel));
-  cron.schedule('0 0,8,16 * * *', () => sendFilteredNews(channel));
-  cron.schedule('0 * * * *', () => checkFuturesSignals(channel));
-
-  console.log('⏰ Cron-jobs programados: watchlist (20m), news (hora), futures (15m)');
+  const ch = await client.channels.fetch(CHANNEL_ID);
+  cron.schedule('*/20 * * * *', ()=>checkWatchlist(ch));     // 20 min
+  cron.schedule('0 0,8,16 * * *', ()=>sendFilteredNews(ch)); // 3 veces/día
+  cron.schedule('0 * * * *', ()=>checkFuturesSignals(ch));   // cada hora
+  console.log('⏰ Cron-jobs en marcha.');
 });
 
-// 4) Manejador de interacciones (slash)
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+// ——— Manejador de slash-commands ————————————
+client.on('interactionCreate', async inter=>{
+  if (!inter.isChatInputCommand()) return;
+  await inter.deferReply({flags:64}).catch(()=>{});
 
-  // defer para ganar tiempo
-  await interaction.deferReply({ flags: 64 }).catch(() => {});
-
-  let reply = { content: '✅ Ejecutado correctamente.', flags: 64 };
-  try {
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    switch (interaction.commandName) {
-      case 'watchlist':
-        await checkWatchlist(channel);
-        break;
-      case 'news':
-        await sendFilteredNews(channel);
-        break;
-      case 'futures':
-        await checkFuturesSignals(channel);
-        break;
-      default:
-        reply = { content: '❓ Comando no reconocido.', flags: 64 };
+  let reply={ content:'✅ Listo.', flags:64 };
+  try{
+    const ch = await client.channels.fetch(CHANNEL_ID);
+    switch(inter.commandName){
+      case 'watchlist': await checkWatchlist(ch);  break;
+      case 'news':      await sendFilteredNews(ch);break;
+      case 'futures':   await checkFuturesSignals(ch);break;
+      case 'sim':       await getSimStats(ch); break;
+      case 'simstats':  await getSimStats(ch); break;
+      default: reply={content:'❓ Comando no reconocido.',flags:64};
     }
-  } catch (err) {
-    console.error('❌ Error al ejecutar comando:', err);
-    reply = { content: '❌ Error interno.', flags: 64 };
+  }catch(e){
+    console.error(e);
+    reply={content:'❌ Error interno.', flags:64};
   }
-
-  // intenta editar la deferred reply, si falla hace followUp
-  await interaction.editReply(reply).catch(() =>
-    interaction.followUp?.(reply).catch(() => {})
-  );
+  await inter.editReply(reply).catch(()=>inter.followUp?.(reply).catch(()=>{}));
 });
 
-// 5) Evita caídas por promesas no manejadas
-process.on('unhandledRejection', error => {
-  console.error('❗ Unhandled promise rejection:', error);
-});
+// ——— safety ——————————————————————————————
+process.on('unhandledRejection', err=>console.error('Unhandled', err));
 
-// 6) Login
+// ——— login ————————————————————————————————
 client.login(TOKEN);

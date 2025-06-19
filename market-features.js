@@ -1,172 +1,168 @@
 /**
- * market-features.js
- * Solo:
- * - checkWatchlist      → precios y %24h de tu lista
- * - sendFilteredNews    → top posts de r/CryptoCurrency
- * - checkFuturesSignals → señal LONG/SHORT con TP/SL
+ * market-features.js  –  Watchlist · News · Futures + simulador
  */
-
 require('dotenv').config();
-const ccxt = require('ccxt');
-const ti = require('technicalindicators');
-const fetch = require('node-fetch');      // npm install node-fetch@2
+const ccxt           = require('ccxt');
+const ti             = require('technicalindicators');
+const fetch          = require('node-fetch');   // v2
 const { EmbedBuilder } = require('discord.js');
+const sim            = require('./simulator');  // ← nuevo
 
-// ───── Configuración ───────────────────────
-const EXCHANGE_ID = process.env.EXCHANGE || 'binanceusdm';
-const SYMBOL      = process.env.SYMBOL  || 'BTC/USDT';
-const TIMEFRAME   = process.env.TIMEFRAME || '1h';  // cambiado a 1 hora
+// ——— Variables de entorno / defaults ————————————————
+const EXCHANGE_ID = process.env.EXCHANGE   || 'binanceusdm';
+const SYMBOL      = process.env.SYMBOL     || 'BTC/USDT';
+const TIMEFRAME   = process.env.TIMEFRAME  || '1h';
 const CANDLES     = 250;
-const WATCHLIST   = (process.env.WATCHLIST || SYMBOL).split(',').map(s => s.trim());
+const WATCHLIST   = (process.env.WATCHLIST || SYMBOL)
+                    .split(',').map(s => s.trim());
 
-// ───── Conexión CCXT ───────────────────────
 const exchange = new ccxt[EXCHANGE_ID]({ enableRateLimit: true });
 
-// ───── 1) WATCHLIST: precios + %24h (cálculo con velas diarias) ───────
+// ————————————————————————————————————————————————
+// 1) WATCHLIST
 async function checkWatchlist(channel) {
   try {
-    const lines = [];
+    const rows = [];
     for (const sym of WATCHLIST) {
       let last, pct;
       try {
-        const ohlcv = await exchange.fetchOHLCV(sym, '1d', undefined, 2);
+        const ohlcv = await exchange.fetchOHLCV(sym,'1d',undefined,2);
         if (ohlcv.length >= 2) {
-          const prevClose = ohlcv[0][4];
+          const prev = ohlcv[0][4];
           last = ohlcv[1][4];
-          pct = ((last - prevClose) / prevClose) * 100;
-        } else {
-          const tk = await exchange.fetchTicker(sym);
-          last = tk.last;
-          pct = typeof tk.percentage === 'number' ? tk.percentage : 0;
+          pct  = (last - prev) / prev * 100;
         }
-      } catch {
+      } catch (e) { /* fallback ticker */ }
+      if (last === undefined) {
         const tk = await exchange.fetchTicker(sym);
         last = tk.last;
-        pct = typeof tk.percentage === 'number' ? tk.percentage : 0;
+        pct  = +tk.percentage || 0;
       }
-      const arrow = pct > 0 ? '📈' : pct < 0 ? '📉' : '➡️';
-      lines.push(`${arrow} **${sym}**: ${last.toFixed(2)} (${pct.toFixed(2)}%)`);
+      const arrow = pct>0?'📈':pct<0?'📉':'➡️';
+      rows.push(`${arrow} **${sym}**: ${last.toFixed(2)} (${pct.toFixed(2)} %)`);
     }
-    const embed = new EmbedBuilder()
-      .setTitle('🔍 Watchlist')
-      .setDescription(lines.join('\n'))
-      .setTimestamp();
-    await channel.send({ embeds: [embed] });
+    const embed = new EmbedBuilder().setTitle('🔍 Watchlist')
+                                    .setDescription(rows.join('\n'))
+                                    .setTimestamp();
+    await channel.send({ embeds:[embed] });
   } catch (err) {
-    console.error('checkWatchlist error', err);
-    await channel.send('❌ Error en Watchlist, revisa la consola.');
+    console.error('watchlist', err);
+    await channel.send('❌ Error en Watchlist.');
   }
 }
 
-// ───── 2) NEWS: top posts de r/CryptoCurrency (usa api.reddit.com)
+// ————————————————————————————————————————————————
+// 2) REDDIT NEWS
 async function sendFilteredNews(channel) {
   try {
-    const res = await fetch(
+    const r = await fetch(
       'https://www.reddit.com/r/CryptoCurrency/top.json?limit=3&t=day&raw_json=1',
-      {
-        headers: {
-          'User-Agent': 'MarketBot/1.0',
-          'Accept': 'application/json'
-        }
-      }
-    );
-    if (!res.ok) {
-      console.error('sendFilteredNews HTTP error', res.status, res.statusText);
-      return channel.send('📰 No pude obtener noticias, status ' + res.status);
-    }
-    const json = await res.json();
-    const posts = json.data.children;
-    if (!posts.length) {
-      return channel.send('📰 No hay posts recientes en r/CryptoCurrency.');
-    }
+      { headers:{ 'User-Agent':'MarketBot/1.0','Accept':'application/json' }});
+    if(!r.ok) return channel.send('📰 Error '+r.status);
+    const json = await r.json();
     const embed = new EmbedBuilder()
-      .setTitle('📰 Top posts • r/CryptoCurrency (24h)')
+      .setTitle('📰 Top r/CryptoCurrency (24 h)')
       .setURL('https://reddit.com/r/CryptoCurrency/')
       .setTimestamp();
-    posts.forEach(({ data: d }) => {
+
+    json.data.children.forEach(({data:d}) =>
       embed.addFields({
-        name: d.title.slice(0, 256),
+        name : d.title.slice(0,256),
         value: `⬆️ ${d.ups} • 💬 ${d.num_comments} • [link](https://reddit.com${d.permalink})`
-      });
-    });
-    await channel.send({ embeds: [embed] });
-  } catch (err) {
-    console.error('sendFilteredNews error', err);
-    await channel.send('❌ Error al obtener noticias, revisa la consola.');
+      }));
+    await channel.send({ embeds:[embed] });
+  } catch(e){
+    console.error('news',e);
+    await channel.send('❌ Error al obtener noticias.');
   }
 }
 
+// ————————————————————————————————————————————————
+// 3) FUTURES + SIMULADOR
+const fastPeriod = 12, slowPeriod = 26;
+const rsiPeriod = 14, rsiLong = 55, rsiShort = 45;
+const color = { LONG:0x2ecc71, SHORT:0xe74c3c, 'NO TRADE':0x95a5a6 };
 
-// ───── 3) FUTURES: señal LONG/SHORT + Entry/SL/TP${1}&TP${2} ─────────────
-const fastPeriod = 12;
-const slowPeriod = 26;
-const rsiPeriod  = 14;
-const rsiLong    = 55;
-const rsiShort   = 45;
-const colorMap   = { LONG: 0x2ecc71, SHORT: 0xe74c3c, 'NO TRADE': 0x95a5a6 };
-
-async function checkFuturesSignals(channel) {
-  try {
-    if (!exchange.markets) await exchange.loadMarkets();
+async function checkFuturesSignals(channel){
+  try{
+    if(!exchange.markets) await exchange.loadMarkets();
     const ohlcv = await exchange.fetchOHLCV(SYMBOL, TIMEFRAME, undefined, CANDLES);
-    const closes = ohlcv.map(c => c[4]);
+    const closes = ohlcv.map(c=>c[4]);
+    const emaF = ti.EMA.calculate({period:fastPeriod, values:closes}).at(-1);
+    const emaS = ti.EMA.calculate({period:slowPeriod,values:closes}).at(-1);
+    const macd = ti.MACD.calculate({
+      values:closes, fastPeriod, slowPeriod, signalPeriod:9
+    }).at(-1);
+    const rsi  = ti.RSI.calculate({period:rsiPeriod, values:closes}).at(-1);
+    const price= closes.at(-1);
 
-    const emaFast = ti.EMA.calculate({ period: fastPeriod, values: closes });
-    const emaSlow = ti.EMA.calculate({ period: slowPeriod, values: closes });
-    const macdArr = ti.MACD.calculate({
-      values: closes,
-      fastPeriod,
-      slowPeriod,
-      signalPeriod: 9,
-      SimpleMAOscillator: false,
-      SimpleMASignal: false
-    });
-    const rsiArr = ti.RSI.calculate({ period: rsiPeriod, values: closes });
-
-    const price = closes.at(-1);
-    const emaF  = emaFast.at(-1);
-    const emaS  = emaSlow.at(-1);
-    const { MACD: macd, signal: macdSig } = macdArr.at(-1);
-    const rsi   = rsiArr.at(-1);
-
-    let dir = 'NO TRADE', reasons = [];
-    if (emaF > emaS && macd > macdSig && rsi > rsiLong) {
-      dir = 'LONG';
-      reasons.push('EMA12 > EMA26', 'MACD alcista', `RSI ${rsi.toFixed(1)} > ${rsiLong}`);
-    } else if (emaF < emaS && macd < macdSig && rsi < rsiShort) {
-      dir = 'SHORT';
-      reasons.push('EMA12 < EMA26', 'MACD bajista', `RSI ${rsi.toFixed(1)} < ${rsiShort}`);
+    let dir='NO TRADE', reasons=[];
+    if (emaF>emaS && macd.MACD>macd.signal && rsi>rsiLong){
+      dir='LONG'; reasons=['EMA12>26','MACD↑',`RSI ${rsi.toFixed(1)}>`+rsiLong];
+    }else if(emaF<emaS && macd.MACD<macd.signal && rsi<rsiShort){
+      dir='SHORT';reasons=['EMA12<26','MACD↓',`RSI ${rsi.toFixed(1)}<`+rsiShort];
     }
 
-    const entry    = price;
-    const stopLoss = emaS;
-    const risk     = Math.abs(entry - stopLoss);
-    let tp1 = null, tp2 = null;
-    if (dir === 'LONG')  [tp1, tp2] = [entry + risk, entry + risk * 2];
-    if (dir === 'SHORT') [tp1, tp2] = [entry - risk, entry - risk * 2];
+    const stopLoss=emaS;
+    const risk=Math.abs(price-stopLoss);
+    const tp1 = dir==='LONG' ? price + risk : dir==='SHORT' ? price - risk : null;
+    const tp2 = dir==='LONG' ? price + risk*2 : dir==='SHORT'? price - risk*2 : null;
 
+    // ——— simulador —————————————————————————
+    sim.trailPeak(sim.stats().balance);
+    const closed = sim.check(price);                // ¿cerramos trade previo?
+    if(!sim.stats().open && dir!=='NO TRADE')       // ¿abrimos nuevo?
+      sim.open(dir, price, tp1, tp2, stopLoss);
+
+    // ——— embed ————————————————————————————
+    const st = sim.stats();
     const embed = new EmbedBuilder()
       .setTitle(`Futures Signal • ${SYMBOL} • ${TIMEFRAME}`)
-      .setColor(colorMap[dir])
-      .setDescription(`**${dir}**\n${reasons.join('\n')}`)
+      .setColor(color[dir])
+      .setDescription(`**${dir}**\n${reasons.join('\n')||'Sin confluencia'}`)
       .addFields(
-        { name: 'Entry',     value: entry.toFixed(2),           inline: true },
-        { name: 'Stop-Loss', value: stopLoss.toFixed(2),        inline: true },
-        { name: 'TP 1:1',    value: tp1  ? tp1.toFixed(2) : '—', inline: true },
-        { name: 'TP 1:2',    value: tp2  ? tp2.toFixed(2) : '—', inline: true }
+        {name:'Entry', value:price.toFixed(2), inline:true},
+        {name:'SL',    value:stopLoss.toFixed(2), inline:true},
+        {name:'TP1',   value:tp1?tp1.toFixed(2):'—', inline:true},
+        {name:'TP2',   value:tp2?tp2.toFixed(2):'—', inline:true},
+        {name:'Balance', value:`${st.balance} USDT`, inline:true}
       )
-      .setFooter({ text: 'No es asesoramiento financiero' })
-      .setTimestamp();
+      .setFooter({text:'Paper-trading · no advice'}).setTimestamp();
 
-    await channel.send({ embeds: [embed] });
-  } catch (err) {
-    console.error('checkFuturesSignals error', err);
-    await channel.send('❌ Error al calcular señal de futuros, revisa logs.');
+    if (closed)
+      embed.addFields({name:'Trade Closed',
+                       value:`${closed.tag} | net ${closed.net.toFixed(2)} USDT`});
+    if (st.open)
+      embed.addFields({name:'Trade Open',
+                       value:`${st.open.dir} @ ${st.open.entry}`});
+
+    await channel.send({ embeds:[embed] });
+  }catch(err){
+    console.error('futures',err);
+    await channel.send('❌ Error señal futuros.');
   }
+}
+
+// ————————————————————————————————————————————————
+function getSimStats(channel){
+  const s=sim.stats();
+  const lines=[
+    `💰 Balance: **${s.balance} USDT**`,
+    s.open
+     ? `📈 Posición: **${s.open.dir}** @ ${s.open.entry} | SL ${s.open.sl}`
+     : '✅ Sin posiciones abiertas.',
+    `📊 Trades: ${s.trades} | Win-rate: ${s.winRate.toFixed(1)} % | ` +
+    `Expectancy: ${s.expectancy} USDT | Max DD: ${s.maxDD} %`
+  ];
+  const embed = new EmbedBuilder().setTitle('🧪 Simulator')
+                                  .setDescription(lines.join('\n'))
+                                  .setTimestamp();
+  return channel.send({embeds:[embed]});
 }
 
 module.exports = {
   checkWatchlist,
   sendFilteredNews,
-  checkFuturesSignals
+  checkFuturesSignals,
+  getSimStats
 };
